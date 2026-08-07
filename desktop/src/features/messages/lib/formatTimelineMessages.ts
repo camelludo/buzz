@@ -36,6 +36,8 @@ import {
   KIND_STREAM_MESSAGE_DIFF,
   KIND_STREAM_DECISION_CARD,
   KIND_STREAM_DECISION_RESPONSE,
+  KIND_STREAM_EVIDENCE_PACKET,
+  KIND_STREAM_DELIVERY_RECEIPT,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
@@ -55,6 +57,8 @@ export function isTimelineContentEvent(event: RelayEvent) {
     event.kind === KIND_STREAM_MESSAGE_DIFF ||
     event.kind === KIND_STREAM_DECISION_CARD ||
     event.kind === KIND_STREAM_DECISION_RESPONSE ||
+    event.kind === KIND_STREAM_EVIDENCE_PACKET ||
+    event.kind === KIND_STREAM_DELIVERY_RECEIPT ||
     event.kind === KIND_SYSTEM_MESSAGE ||
     event.kind === KIND_JOB_REQUEST ||
     event.kind === KIND_JOB_ACCEPTED ||
