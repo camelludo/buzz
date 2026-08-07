@@ -1,0 +1,90 @@
+name: Private canary relay image
+
+on:
+  push:
+    branches:
+      - codex/buzz-native-card-canary-image
+
+permissions: {}
+
+concurrency:
+  group: private-canary-relay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-amd64:
+    name: Build isolated amd64 relay artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Verify native-card feature commit is included
+        env:
+          FEATURE_COMMIT: 43b1a6f017496f4c9cdabaf8bd19011b9360aa22
+        run: git merge-base --is-ancestor "$FEATURE_COMMIT" HEAD
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+
+      - name: Build pinned relay archive
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          tags: buzz-relay-card-canary:${{ github.sha }}
+          outputs: type=docker,dest=/tmp/buzz-relay-card-canary.tar
+          cache-from: type=gha,scope=buzz-relay-card-canary-amd64
+          cache-to: type=gha,mode=max,scope=buzz-relay-card-canary-amd64
+
+      - name: Seal artifact provenance
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          FEATURE_COMMIT: 43b1a6f017496f4c9cdabaf8bd19011b9360aa22
+        run: |
+          gzip -1 /tmp/buzz-relay-card-canary.tar
+          sha256sum /tmp/buzz-relay-card-canary.tar.gz > /tmp/buzz-relay-card-canary.tar.gz.sha256
+          jq -n \
+            --arg workflow_commit "$GITHUB_SHA" \
+            --arg feature_commit "$FEATURE_COMMIT" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            '{workflow_commit:$workflow_commit,feature_commit:$feature_commit,image_digest:$image_digest,platform:"linux/amd64"}' \
+            > /tmp/buzz-relay-card-canary.provenance.json
+
+      - name: Upload sealed relay artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: buzz-relay-card-canary-${{ github.sha }}
+          path: |
+            /tmp/buzz-relay-card-canary.tar.gz
+            /tmp/buzz-relay-card-canary.tar.gz.sha256
+            /tmp/buzz-relay-card-canary.provenance.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      - name: Record immutable build receipt
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Private Buzz relay canary"
+            echo "- Source: \`$GITHUB_SHA\`"
+            echo "- Native-card feature: \`43b1a6f017496f4c9cdabaf8bd19011b9360aa22\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- Build digest: \`$IMAGE_DIGEST\`"
+            echo "- Delivery: sealed workflow artifact; no registry credential is required on the host"
+          } >> "$GITHUB_STEP_SUMMARY"
