@@ -16,6 +16,8 @@ import {
 } from "@/features/decision-cards/ui/DecisionCard";
 import { DeliveryReceiptCard } from "@/features/evidence-cards/ui/DeliveryReceiptCard";
 import { EvidencePacketCard } from "@/features/evidence-cards/ui/EvidencePacketCard";
+import { ReviewCard } from "@/features/evidence-cards/ui/ReviewCard";
+import { TriageCard } from "@/features/evidence-cards/ui/TriageCard";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -37,6 +39,8 @@ import {
   KIND_STREAM_DELIVERY_RECEIPT,
   KIND_STREAM_EVIDENCE_PACKET,
   KIND_STREAM_MESSAGE_DIFF,
+  KIND_STREAM_REVIEW_CARD,
+  KIND_STREAM_TRIAGE_CARD,
 } from "@/shared/constants/kinds";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { cn } from "@/shared/lib/cn";
@@ -328,6 +332,10 @@ export const MessageRow = React.memo(
           return <EvidencePacketCard message={message} />;
         case KIND_STREAM_DELIVERY_RECEIPT:
           return <DeliveryReceiptCard message={message} />;
+        case KIND_STREAM_TRIAGE_CARD:
+          return <TriageCard message={message} />;
+        case KIND_STREAM_REVIEW_CARD:
+          return <ReviewCard message={message} />;
         case KIND_STREAM_MESSAGE_DIFF:
           return (
             <React.Suspense

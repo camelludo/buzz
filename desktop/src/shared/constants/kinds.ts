@@ -24,6 +24,8 @@ export const KIND_STREAM_DECISION_CARD = 40009;
 export const KIND_STREAM_DECISION_RESPONSE = 40010;
 export const KIND_STREAM_EVIDENCE_PACKET = 40011;
 export const KIND_STREAM_DELIVERY_RECEIPT = 40012;
+export const KIND_STREAM_TRIAGE_CARD = 40013;
+export const KIND_STREAM_REVIEW_CARD = 40014;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
 export const KIND_JOB_REQUEST = 43001;
@@ -91,6 +93,8 @@ export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_STREAM_DECISION_RESPONSE,
   KIND_STREAM_EVIDENCE_PACKET,
   KIND_STREAM_DELIVERY_RECEIPT,
+  KIND_STREAM_TRIAGE_CARD,
+  KIND_STREAM_REVIEW_CARD,
 ] as const;
 
 // Keep this in sync with the Home-feed mention query in buzz-db.
@@ -141,6 +145,8 @@ export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_STREAM_DECISION_RESPONSE, // 40010 — durable decision receipt
   KIND_STREAM_EVIDENCE_PACKET, // 40011 — evidence packet card
   KIND_STREAM_DELIVERY_RECEIPT, // 40012 — delivery receipt card
+  KIND_STREAM_TRIAGE_CARD, // 40013 — triage card
+  KIND_STREAM_REVIEW_CARD, // 40014 — review card
   KIND_SYSTEM_MESSAGE, // 40099 — system rows (join/leave/channel-created)
   KIND_JOB_REQUEST, // 43001
   KIND_JOB_ACCEPTED, // 43002

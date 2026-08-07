@@ -499,6 +499,10 @@ pub const KIND_STREAM_DECISION_RESPONSE: u32 = 40010;
 pub const KIND_STREAM_EVIDENCE_PACKET: u32 = 40011;
 /// A channel-native structured delivery receipt with a Markdown fallback.
 pub const KIND_STREAM_DELIVERY_RECEIPT: u32 = 40012;
+/// A channel-native structured triage card with a Markdown fallback.
+pub const KIND_STREAM_TRIAGE_CARD: u32 = 40013;
+/// A channel-native structured review card with a Markdown fallback.
+pub const KIND_STREAM_REVIEW_CARD: u32 = 40014;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
 /// System message for channel state changes (join, leave, rename, etc.).
@@ -719,6 +723,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_STREAM_DECISION_RESPONSE,
     KIND_STREAM_EVIDENCE_PACKET,
     KIND_STREAM_DELIVERY_RECEIPT,
+    KIND_STREAM_TRIAGE_CARD,
+    KIND_STREAM_REVIEW_CARD,
     KIND_CANVAS,
     KIND_SYSTEM_MESSAGE,
     KIND_CHANNEL_SUMMARY,

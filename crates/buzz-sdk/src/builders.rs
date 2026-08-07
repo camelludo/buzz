@@ -1,4 +1,4 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (40 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
@@ -16,12 +16,15 @@ use buzz_core::{
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
         KIND_STREAM_DECISION_CARD, KIND_STREAM_DECISION_RESPONSE, KIND_STREAM_DELIVERY_RECEIPT,
-        KIND_STREAM_EVIDENCE_PACKET, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_STREAM_EVIDENCE_PACKET, KIND_STREAM_REVIEW_CARD, KIND_STREAM_TRIAGE_CARD,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
         OBSERVER_FRAME_TELEMETRY,
     },
+    review_card::ReviewCardPayload,
+    triage_card::TriageCardPayload,
 };
 use nostr::{EventBuilder, Kind, Tag};
 use uuid::Uuid;
@@ -416,6 +419,95 @@ pub fn build_delivery_receipt(
 
     Ok(EventBuilder::new(
         Kind::Custom(KIND_STREAM_DELIVERY_RECEIPT as u16),
+        fallback_markdown,
+    )
+    .tags(tags))
+}
+
+/// Build a channel-native triage card (kind 40013).
+///
+/// `fallback_markdown` remains readable in clients that do not understand the
+/// structured `triage_card` tag. The payload hash binds future actions to the
+/// exact grouped triage view the human saw.
+pub fn build_triage_card(
+    channel_id: Uuid,
+    payload: &TriageCardPayload,
+    fallback_markdown: &str,
+    thread_ref: Option<&ThreadRef>,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.into()))?;
+    check_content(fallback_markdown, 64 * 1024)?;
+    if fallback_markdown.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "triage card Markdown fallback must not be empty".into(),
+        ));
+    }
+
+    let encoded = payload
+        .canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    check_content(&encoded, 16 * 1024)?;
+    let payload_hash = payload
+        .payload_hash()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["triage_card", &encoded])?,
+        tag(&["payload_hash", &payload_hash])?,
+        tag(&["shadow", if payload.shadow { "1" } else { "0" }])?,
+    ];
+    if let Some(thread_ref) = thread_ref {
+        thread_tags(thread_ref, &mut tags)?;
+    }
+
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_STREAM_TRIAGE_CARD as u16),
+        fallback_markdown,
+    )
+    .tags(tags))
+}
+
+/// Build a channel-native review card (kind 40014).
+///
+/// `fallback_markdown` makes the review state explicit in older clients; the
+/// structured `review_card` tag is the durable machine-readable record.
+pub fn build_review_card(
+    channel_id: Uuid,
+    payload: &ReviewCardPayload,
+    fallback_markdown: &str,
+    thread_ref: Option<&ThreadRef>,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.into()))?;
+    check_content(fallback_markdown, 64 * 1024)?;
+    if fallback_markdown.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "review card Markdown fallback must not be empty".into(),
+        ));
+    }
+
+    let encoded = payload
+        .canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    check_content(&encoded, 16 * 1024)?;
+    let payload_hash = payload
+        .payload_hash()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["review_card", &encoded])?,
+        tag(&["payload_hash", &payload_hash])?,
+        tag(&["shadow", if payload.shadow { "1" } else { "0" }])?,
+    ];
+    if let Some(thread_ref) = thread_ref {
+        thread_tags(thread_ref, &mut tags)?;
+    }
+
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_STREAM_REVIEW_CARD as u16),
         fallback_markdown,
     )
     .tags(tags))
