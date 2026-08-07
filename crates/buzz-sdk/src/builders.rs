@@ -5,6 +5,8 @@
 
 use buzz_core::{
     decision_card::{DecisionCardPayload, DecisionResponsePayload},
+    delivery_receipt::DeliveryReceiptPayload,
+    evidence_packet::EvidencePacketPayload,
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
@@ -13,8 +15,8 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_STREAM_DECISION_CARD, KIND_STREAM_DECISION_RESPONSE, KIND_USER_STATUS,
-        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_STREAM_DECISION_CARD, KIND_STREAM_DECISION_RESPONSE, KIND_STREAM_DELIVERY_RECEIPT,
+        KIND_STREAM_EVIDENCE_PACKET, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -325,6 +327,95 @@ pub fn build_decision_response(
 
     Ok(EventBuilder::new(
         Kind::Custom(KIND_STREAM_DECISION_RESPONSE as u16),
+        fallback_markdown,
+    )
+    .tags(tags))
+}
+
+/// Build a channel-native evidence packet (kind 40011).
+///
+/// `fallback_markdown` remains readable in clients that do not understand the
+/// structured `evidence_packet` tag. The payload hash binds future actions to
+/// the exact structured evidence the human saw.
+pub fn build_evidence_packet(
+    channel_id: Uuid,
+    payload: &EvidencePacketPayload,
+    fallback_markdown: &str,
+    thread_ref: Option<&ThreadRef>,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.into()))?;
+    check_content(fallback_markdown, 64 * 1024)?;
+    if fallback_markdown.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "evidence packet Markdown fallback must not be empty".into(),
+        ));
+    }
+
+    let encoded = payload
+        .canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    check_content(&encoded, 16 * 1024)?;
+    let payload_hash = payload
+        .payload_hash()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["evidence_packet", &encoded])?,
+        tag(&["payload_hash", &payload_hash])?,
+        tag(&["shadow", if payload.shadow { "1" } else { "0" }])?,
+    ];
+    if let Some(thread_ref) = thread_ref {
+        thread_tags(thread_ref, &mut tags)?;
+    }
+
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_STREAM_EVIDENCE_PACKET as u16),
+        fallback_markdown,
+    )
+    .tags(tags))
+}
+
+/// Build a channel-native delivery receipt (kind 40012).
+///
+/// `fallback_markdown` makes the outcome explicit in older clients; the
+/// structured `delivery_receipt` tag is the durable machine-readable record.
+pub fn build_delivery_receipt(
+    channel_id: Uuid,
+    payload: &DeliveryReceiptPayload,
+    fallback_markdown: &str,
+    thread_ref: Option<&ThreadRef>,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.into()))?;
+    check_content(fallback_markdown, 64 * 1024)?;
+    if fallback_markdown.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "delivery receipt Markdown fallback must not be empty".into(),
+        ));
+    }
+
+    let encoded = payload
+        .canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    check_content(&encoded, 16 * 1024)?;
+    let payload_hash = payload
+        .payload_hash()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["delivery_receipt", &encoded])?,
+        tag(&["payload_hash", &payload_hash])?,
+        tag(&["shadow", if payload.shadow { "1" } else { "0" }])?,
+    ];
+    if let Some(thread_ref) = thread_ref {
+        thread_tags(thread_ref, &mut tags)?;
+    }
+
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_STREAM_DELIVERY_RECEIPT as u16),
         fallback_markdown,
     )
     .tags(tags))

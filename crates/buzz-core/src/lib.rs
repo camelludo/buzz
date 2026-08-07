@@ -11,6 +11,8 @@ pub mod agent_turn_metric;
 pub mod channel;
 /// Typed channel-native decision cards and durable responses.
 pub mod decision_card;
+/// Typed channel-native delivery receipt cards.
+pub mod delivery_receipt;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;
@@ -18,6 +20,8 @@ pub mod engram;
 pub mod error;
 /// Relay-side event wrapper with verification tracking.
 pub mod event;
+/// Typed channel-native evidence packet cards.
+pub mod evidence_packet;
 /// NIP-01 subscription filter matching.
 pub mod filter;
 /// Git permission types — ref patterns, protection rules, policy evaluation.
