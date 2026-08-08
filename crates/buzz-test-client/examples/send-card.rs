@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls provider");
     let args: Vec<String> = std::env::args().collect();
     let secret = args.get(1).expect("secret");
     let relay = args.get(2).expect("relay url");
