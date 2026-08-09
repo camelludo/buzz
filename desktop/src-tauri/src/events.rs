@@ -833,13 +833,13 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
 
 /// Kind 46030 — grant an approval token (with optional note).
 pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = vec![tag(vec!["d", token])?];
     Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
 }
 
 /// Kind 46031 — deny an approval token (with optional note).
 pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = vec![tag(vec!["d", token])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
 }
 
@@ -854,6 +854,26 @@ mod tests {
         let channel_id = Uuid::new_v4();
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
         assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
+    }
+
+    #[test]
+    fn approval_builders_use_the_protocol_token_hash_tag() {
+        let secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let keys = Keys::new(secret);
+        let token_hash = "ab".repeat(32);
+
+        for builder in [
+            build_approval_grant(&token_hash, Some("approve")),
+            build_approval_deny(&token_hash, Some("deny")),
+        ] {
+            let event = builder.unwrap().sign_with_keys(&keys).unwrap();
+            let tags: Vec<Vec<String>> =
+                event.tags.iter().map(|tag| tag.as_slice().to_vec()).collect();
+            assert_eq!(tags, vec![vec!["d".to_owned(), token_hash.clone()]]);
+        }
     }
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.

@@ -977,7 +977,7 @@ async fn handle_workflow_trigger(
         )
         .await;
         engine
-            .finalize_run(community_id, run_id, result, None)
+            .finalize_run(community_id, run_id, &def, result, None)
             .await;
     });
 
@@ -1365,6 +1365,6 @@ async fn resume_workflow_after_approval(
     )
     .await;
     engine
-        .finalize_run(community_id, run_id, result, existing_trace)
+        .finalize_run(community_id, run_id, &def, result, existing_trace)
         .await;
 }

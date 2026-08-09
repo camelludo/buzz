@@ -5,7 +5,11 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    relay::{parse_command_response, query_relay, submit_event},
+    relay::{
+        build_nip98_auth_header, classify_request_error, parse_command_response,
+        parse_json_response, query_relay, relay_api_base_url_with_override,
+        relay_error_message, submit_event,
+    },
 };
 
 // ── Wire shapes (snake_case, consumed by tauriWorkflows.ts) ──────────────────
@@ -121,26 +125,19 @@ pub async fn get_workflow(
 pub async fn get_workflow_runs(
     workflow_id: String,
     limit: Option<u32>,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Run reconstruction is a clearly-scoped follow-up.
-    // The authoritative run record the frontend's `WorkflowRun` shape needs
-    // (status / current_step / execution_trace / error_message) lives in the
-    // relay DB and is not exposed to the desktop client as a single queryable
-    // record. If the relay starts emitting lifecycle events (46001–46007, …),
-    // folding that stream into `WorkflowRun` would be another viable design.
-    // The important bit for this command is that raw lifecycle events are not
-    // the `RawWorkflowRun` contract.
-    //
-    // Until then we return a bare empty array — NOT a raw-event wrapper. The
-    // frontend wrapper (`getWorkflowRuns`) does `raw.map(fromRawWorkflowRun)`,
-    // so it must receive an array; the wrapped `{ runs: [...] }` shape would
-    // make `.map()` throw and crash the detail panel (the same TypeError class
-    // as the original page bug). Raw lifecycle events also don't carry the
-    // `id`/`workflow_id`/`status`/… fields `RawWorkflowRun` expects, so an
-    // empty list is the honest, safe placeholder.
-    let _ = (workflow_id, limit);
-    Ok(Vec::new())
+    let workflow_id = workflow_id
+        .parse::<uuid::Uuid>()
+        .map_err(|_| "invalid workflow id".to_string())?;
+    let requested_limit = limit.unwrap_or(100).clamp(1, 500);
+    get_workflow_api(
+        &state,
+        &format!(
+            "/api/workflows/{workflow_id}/runs?limit={requested_limit}"
+        ),
+    )
+    .await
 }
 
 // ── Writes ───────────────────────────────────────────────────────────────────
@@ -254,15 +251,21 @@ pub async fn trigger_workflow(
 pub async fn get_run_approvals(
     workflow_id: String,
     run_id: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<Value>, String> {
-    // TODO(workflow-runs): Like runs (see `get_workflow_runs`), reconstructing
-    // approvals into the frontend's `WorkflowApproval` shape from lifecycle
-    // events (46010/46011/46012) is a clearly-scoped follow-up tracked under
-    // TODO(workflow-runs). Return a bare empty array so the frontend's
-    // `getRunApprovals` (`raw.map(fromRawApproval)`) is safe.
-    let _ = (workflow_id, run_id);
-    Ok(Vec::new())
+    let workflow_id = workflow_id
+        .parse::<uuid::Uuid>()
+        .map_err(|_| "invalid workflow id".to_string())?;
+    let run_id = run_id
+        .parse::<uuid::Uuid>()
+        .map_err(|_| "invalid run id".to_string())?;
+    get_workflow_api(
+        &state,
+        &format!(
+            "/api/workflows/{workflow_id}/runs/{run_id}/approvals"
+        ),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -288,6 +291,24 @@ pub async fn deny_approval(
 }
 
 // ── Helpers (pure, unit-tested in workflows_tests.rs) ─────────────────────────
+
+async fn get_workflow_api(state: &AppState, path: &str) -> Result<Vec<Value>, String> {
+    crate::relay_admission::wait_for_rate_limit().await;
+    let base_url = relay_api_base_url_with_override(state);
+    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let auth = build_nip98_auth_header(&reqwest::Method::GET, &url, &[], state)?;
+    let response = state
+        .http_client
+        .get(&url)
+        .header("Authorization", auth)
+        .send()
+        .await
+        .map_err(|error| classify_request_error(&error))?;
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+    parse_json_response(response).await
+}
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;

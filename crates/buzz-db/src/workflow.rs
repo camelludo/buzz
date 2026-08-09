@@ -919,6 +919,82 @@ pub async fn update_workflow_run(
     Ok(())
 }
 
+/// Atomically persist a pending approval and suspend its workflow run.
+///
+/// Keeping the approval insert and run-state transition in one transaction
+/// prevents an approval card from being visible for a run that is still
+/// marked running (or a waiting run with no actionable approval row).
+pub async fn suspend_workflow_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    current_step: i32,
+    trace: &serde_json::Value,
+    params: CreateApprovalParams<'_>,
+) -> Result<()> {
+    let CreateApprovalParams {
+        community_id,
+        token,
+        workflow_id,
+        run_id: approval_run_id,
+        step_id,
+        step_index,
+        approver_spec,
+        expires_at,
+    } = params;
+
+    if approval_run_id != run_id {
+        return Err(DbError::InvalidData(
+            "approval run id does not match workflow run".into(),
+        ));
+    }
+
+    let token_hash = hash_approval_token(token);
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO workflow_approvals
+            (community_id, token, workflow_id, run_id, step_id, step_index, approver_spec, status, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(token_hash)
+    .bind(workflow_id)
+    .bind(approval_run_id)
+    .bind(step_id)
+    .bind(step_index)
+    .bind(approver_spec)
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await?;
+
+    let affected = sqlx::query(
+        r#"
+        UPDATE workflow_runs
+        SET status = 'waiting_approval'::run_status,
+            current_step = $1,
+            execution_trace = $2,
+            error_message = NULL
+        WHERE community_id = $3 AND id = $4
+        "#,
+    )
+    .bind(current_step)
+    .bind(trace)
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("workflow_run {run_id}")));
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 // -- Approval CRUD ------------------------------------------------------------
 
 /// Parameters for creating a new approval request.
