@@ -33,6 +33,40 @@ pub enum ActionSinkError {
     EmptyContent,
 }
 
+/// Data required to publish one durable native approval request.
+///
+/// Keeping the publication payload together prevents the action-sink contract
+/// from growing an argument list whenever the native event gains another
+/// field. The raw approval token is intentionally absent; only its hash is
+/// allowed across this boundary.
+#[derive(Debug, Clone)]
+pub struct ApprovalRequestPublication {
+    /// The community that owns the workflow run.
+    pub community_id: CommunityId,
+    /// UUID string of the destination channel.
+    pub channel_id: String,
+    /// Workflow identity.
+    pub workflow_id: Uuid,
+    /// Run identity.
+    pub run_id: Uuid,
+    /// Workflow step identity.
+    pub step_id: String,
+    /// Zero-based workflow step index.
+    pub step_index: i32,
+    /// Serialized approver specification.
+    pub approver_spec: String,
+    /// Human-readable approval message.
+    pub message: String,
+    /// Approval expiry.
+    pub expires_at: DateTime<Utc>,
+    /// SHA-256 digest used by the approval row.
+    pub token_hash: String,
+    /// Triggering event ID, when the approval belongs in a thread.
+    pub origin_event_id: Option<String>,
+    /// Workflow owner pubkey used for attribution and access checks.
+    pub author_pubkey: String,
+}
+
 impl From<ActionSinkError> for crate::WorkflowError {
     fn from(e: ActionSinkError) -> Self {
         crate::WorkflowError::WebhookError(e.to_string())
@@ -79,17 +113,6 @@ pub trait ActionSink: Send + Sync {
     /// event, allowing the relay to place the card in that thread.
     fn publish_approval_request(
         &self,
-        community_id: CommunityId,
-        channel_id: &str,
-        workflow_id: Uuid,
-        run_id: Uuid,
-        step_id: &str,
-        step_index: i32,
-        approver_spec: &str,
-        message: &str,
-        expires_at: DateTime<Utc>,
-        token_hash: &str,
-        origin_event_id: Option<&str>,
-        author_pubkey: &str,
+        request: ApprovalRequestPublication,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

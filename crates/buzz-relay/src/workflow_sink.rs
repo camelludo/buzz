@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak};
 
 use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, ApprovalRequestPublication};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
@@ -170,27 +170,21 @@ impl RelayActionSink {
 }
 
 fn approval_request_content(
-    workflow_id: Uuid,
-    run_id: Uuid,
-    step_id: &str,
-    step_index: i32,
-    approver_spec: &str,
-    message: &str,
-    expires_at: chrono::DateTime<Utc>,
+    request: &ApprovalRequestPublication,
     author_pubkey: &str,
 ) -> Result<String, ActionSinkError> {
-    if message.trim().is_empty() {
+    if request.message.trim().is_empty() {
         return Err(ActionSinkError::EmptyContent);
     }
 
     serde_json::to_string(&serde_json::json!({
-        "message": message,
-        "approver_spec": approver_spec,
-        "workflow_id": workflow_id,
-        "run_id": run_id,
-        "step_id": step_id,
-        "step_index": step_index,
-        "expires_at": expires_at.to_rfc3339(),
+        "message": request.message,
+        "approver_spec": request.approver_spec,
+        "workflow_id": request.workflow_id,
+        "run_id": request.run_id,
+        "step_id": request.step_id,
+        "step_index": request.step_index,
+        "expires_at": request.expires_at.to_rfc3339(),
         "author_pubkey": author_pubkey,
         "status": "pending",
     }))
@@ -450,27 +444,8 @@ impl ActionSink for RelayActionSink {
 
     fn publish_approval_request(
         &self,
-        community_id: CommunityId,
-        channel_id: &str,
-        workflow_id: Uuid,
-        run_id: Uuid,
-        step_id: &str,
-        step_index: i32,
-        approver_spec: &str,
-        message: &str,
-        expires_at: chrono::DateTime<Utc>,
-        token_hash: &str,
-        origin_event_id: Option<&str>,
-        author_pubkey: &str,
+        request: ApprovalRequestPublication,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
-        let channel_id = channel_id.to_owned();
-        let step_id = step_id.to_owned();
-        let approver_spec = approver_spec.to_owned();
-        let message = message.to_owned();
-        let token_hash = token_hash.to_owned();
-        let origin_event_id = origin_event_id.map(str::to_owned);
-        let author_pubkey = author_pubkey.to_owned();
-
         Box::pin(async move {
             let state = self
                 .state
@@ -479,35 +454,36 @@ impl ActionSink for RelayActionSink {
 
             let host = state
                 .db
-                .lookup_community_host(community_id)
+                .lookup_community_host(request.community_id)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?
                 .ok_or_else(|| {
                     ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
+                        "workflow run community {} is not mapped to a host",
+                        request.community_id
                     ))
                 })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let tenant = buzz_core::tenant::TenantContext::resolved(request.community_id, host);
 
-            let channel_uuid = Uuid::parse_str(&channel_id)
+            let channel_uuid = Uuid::parse_str(&request.channel_id)
                 .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
             let channel_id_canonical = channel_uuid.to_string();
             let channel = state
                 .db
-                .get_channel(community_id, channel_uuid)
+                .get_channel(request.community_id, channel_uuid)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
             if channel.archived_at.is_some() {
                 return Err(ActionSinkError::ChannelArchived(channel_id_canonical));
             }
 
-            let owner = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+            let owner = nostr::PublicKey::from_hex(&request.author_pubkey).map_err(|e| {
                 ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
             })?;
             let owner_bytes = owner.to_bytes().to_vec();
             let owner_hex = owner.to_hex();
             if !state
-                .is_member_cached(community_id, channel_uuid, &owner_bytes)
+                .is_member_cached(request.community_id, channel_uuid, &owner_bytes)
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?
                 && channel.visibility != "open"
@@ -517,24 +493,15 @@ impl ActionSink for RelayActionSink {
                 ));
             }
 
-            let content = approval_request_content(
-                workflow_id,
-                run_id,
-                &step_id,
-                step_index,
-                &approver_spec,
-                &message,
-                expires_at,
-                &owner_hex,
-            )?;
+            let content = approval_request_content(&request, &owner_hex)?;
             let tags = approval_request_tags(
                 &channel_id_canonical,
-                workflow_id,
-                run_id,
-                &step_id,
-                &token_hash,
-                &approver_spec,
-                origin_event_id.as_deref(),
+                request.workflow_id,
+                request.run_id,
+                &request.step_id,
+                &request.token_hash,
+                &request.approver_spec,
+                request.origin_event_id.as_deref(),
             )?;
             let event =
                 EventBuilder::new(Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16), content)
@@ -548,14 +515,14 @@ impl ActionSink for RelayActionSink {
                 chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
                     .unwrap_or_else(Utc::now);
 
-            let parent = match origin_event_id.as_deref() {
+            let parent = match request.origin_event_id.as_deref() {
                 Some(origin_event_id) => {
                     let origin_bytes = hex::decode(origin_event_id).map_err(|e| {
                         ActionSinkError::InvalidInput(format!("invalid origin event id: {e}"))
                     })?;
                     state
                         .db
-                        .get_event_by_id(community_id, &origin_bytes)
+                        .get_event_by_id(request.community_id, &origin_bytes)
                         .await
                         .map_err(|e| ActionSinkError::Database(e.to_string()))?
                         .map(|stored| (origin_bytes, stored.event.created_at.as_secs() as i64))
@@ -581,7 +548,7 @@ impl ActionSink for RelayActionSink {
             let (stored_event, was_inserted) = state
                 .db
                 .insert_event_with_thread_metadata(
-                    community_id,
+                    request.community_id,
                     &event,
                     Some(channel_uuid),
                     thread_meta,
@@ -647,17 +614,22 @@ mod tests {
         let workflow_id = Uuid::new_v4();
         let run_id = Uuid::new_v4();
         let raw_token = "raw-token-must-not-escape";
-        let content = approval_request_content(
+        let request = ApprovalRequestPublication {
+            community_id: CommunityId::from_uuid(Uuid::new_v4()),
+            channel_id: "11111111-1111-4111-8111-111111111111".to_string(),
             workflow_id,
             run_id,
-            "gate",
-            1,
-            "role:admin",
-            "Approve the corrected #625 redraft",
-            Utc::now(),
-            &"b".repeat(64),
-        )
-        .expect("valid approval content");
+            step_id: "gate".to_string(),
+            step_index: 1,
+            approver_spec: "role:admin".to_string(),
+            message: "Approve the corrected #625 redraft".to_string(),
+            expires_at: Utc::now(),
+            token_hash: "b".repeat(64),
+            origin_event_id: None,
+            author_pubkey: "b".repeat(64),
+        };
+        let content =
+            approval_request_content(&request, &"b".repeat(64)).expect("valid approval content");
 
         assert!(content.contains("Approve the corrected #625 redraft"));
         assert!(content.contains("role:admin"));

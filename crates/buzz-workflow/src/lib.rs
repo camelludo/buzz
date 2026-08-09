@@ -35,7 +35,7 @@ pub mod error;
 pub mod executor;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, ApprovalRequestPublication};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
@@ -349,23 +349,21 @@ impl WorkflowEngine {
                                     return;
                                 };
                                 let author_pubkey = hex::encode(&workflow.owner_pubkey);
-                                if let Err(e) = sink
-                                    .publish_approval_request(
-                                        community_id,
-                                        &channel_id.to_string(),
-                                        workflow_id,
-                                        run_id,
-                                        &step_id,
-                                        result.step_index as i32,
-                                        &approval.approver_spec,
-                                        &approval.message,
-                                        expires_at,
-                                        &token_hash,
-                                        origin_event_id.as_deref(),
-                                        &author_pubkey,
-                                    )
-                                    .await
-                                {
+                                let request = ApprovalRequestPublication {
+                                    community_id,
+                                    channel_id: channel_id.to_string(),
+                                    workflow_id,
+                                    run_id,
+                                    step_id: step_id.clone(),
+                                    step_index: result.step_index as i32,
+                                    approver_spec: approval.approver_spec.clone(),
+                                    message: approval.message.clone(),
+                                    expires_at,
+                                    token_hash,
+                                    origin_event_id,
+                                    author_pubkey,
+                                };
+                                if let Err(e) = sink.publish_approval_request(request).await {
                                     tracing::error!(
                                         run_id = %run_id,
                                         "Approval persisted but native request publication failed: {e}"
