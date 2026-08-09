@@ -25,6 +25,7 @@ import {
   THREAD_REPLY_LINE_WIDTH_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import {
+  KIND_APPROVAL_REQUEST,
   KIND_HUDDLE_STARTED,
   KIND_STREAM_MESSAGE_DIFF,
 } from "@/shared/constants/kinds";
@@ -52,6 +53,8 @@ import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { WorkflowApprovalCard } from "@/features/workflows/ui/WorkflowApprovalCard";
+import { parseWorkflowApprovalEvent } from "@/features/workflows/lib/parseWorkflowApprovalEvent";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
@@ -342,6 +345,22 @@ export const MessageRow = React.memo(
 
     const renderBody = () => {
       switch (message.kind) {
+        case KIND_APPROVAL_REQUEST: {
+          const approval = parseWorkflowApprovalEvent({
+            kind: message.kind,
+            created_at: message.createdAt,
+            tags: message.tags ?? [],
+            content: message.body,
+          });
+          if (approval) {
+            return <WorkflowApprovalCard approval={approval} />;
+          }
+          return (
+            <p className="text-sm text-destructive">
+              Unable to render this approval request.
+            </p>
+          );
+        }
         case KIND_STREAM_MESSAGE_DIFF:
           return (
             <React.Suspense

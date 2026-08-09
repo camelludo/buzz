@@ -83,6 +83,7 @@ export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_STREAM_MESSAGE_V2,
   KIND_FORUM_POST,
   KIND_FORUM_COMMENT,
+  KIND_APPROVAL_REQUEST,
 ] as const;
 
 // Keep this in sync with the Home-feed mention query in buzz-db.
@@ -128,6 +129,7 @@ export const CHANNEL_AUX_EVENT_KINDS = [
 export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_STREAM_MESSAGE, // 9
   KIND_STREAM_MESSAGE_V2, // 40002
+  KIND_APPROVAL_REQUEST, // 46010 — native workflow approval card
   KIND_STREAM_MESSAGE_DIFF, // 40008 — diff messages (own row)
   KIND_SYSTEM_MESSAGE, // 40099 — system rows (join/leave/channel-created)
   KIND_JOB_REQUEST, // 43001

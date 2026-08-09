@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
@@ -167,6 +167,91 @@ impl RelayActionSink {
             state: Arc::downgrade(state),
         }
     }
+}
+
+fn approval_request_content(
+    workflow_id: Uuid,
+    run_id: Uuid,
+    step_id: &str,
+    step_index: i32,
+    approver_spec: &str,
+    message: &str,
+    expires_at: chrono::DateTime<Utc>,
+    author_pubkey: &str,
+) -> Result<String, ActionSinkError> {
+    if message.trim().is_empty() {
+        return Err(ActionSinkError::EmptyContent);
+    }
+
+    serde_json::to_string(&serde_json::json!({
+        "message": message,
+        "approver_spec": approver_spec,
+        "workflow_id": workflow_id,
+        "run_id": run_id,
+        "step_id": step_id,
+        "step_index": step_index,
+        "expires_at": expires_at.to_rfc3339(),
+        "author_pubkey": author_pubkey,
+        "status": "pending",
+    }))
+    .map_err(|e| ActionSinkError::EventBuild(format!("approval content: {e}")))
+}
+
+fn approval_request_tags(
+    channel_id: &str,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    step_id: &str,
+    token_hash: &str,
+    approver_spec: &str,
+    origin_event_id: Option<&str>,
+) -> Result<Vec<Tag>, ActionSinkError> {
+    let token_bytes = hex::decode(token_hash)
+        .map_err(|e| ActionSinkError::InvalidInput(format!("invalid approval token hash: {e}")))?;
+    if token_bytes.len() != 32 {
+        return Err(ActionSinkError::InvalidInput(
+            "approval token hash must be 32 bytes".into(),
+        ));
+    }
+    let token_hash = hex::encode(token_bytes);
+
+    let mut tags = vec![
+        Tag::parse(["h", channel_id])
+            .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+        Tag::parse(["d", &token_hash])
+            .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?,
+        Tag::parse(["workflow", &workflow_id.to_string()])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+        Tag::parse(["run", &run_id.to_string()])
+            .map_err(|e| ActionSinkError::EventBuild(format!("run tag: {e}")))?,
+        Tag::parse(["step", step_id])
+            .map_err(|e| ActionSinkError::EventBuild(format!("step tag: {e}")))?,
+        Tag::parse(["buzz:workflow", "approval"])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow marker tag: {e}")))?,
+    ];
+
+    if let Ok(approver) = nostr::PublicKey::from_hex(approver_spec) {
+        tags.push(
+            Tag::parse(["p", &approver.to_hex()])
+                .map_err(|e| ActionSinkError::EventBuild(format!("approver p tag: {e}")))?,
+        );
+    }
+
+    if let Some(origin_event_id) = origin_event_id {
+        let origin_bytes = hex::decode(origin_event_id)
+            .map_err(|e| ActionSinkError::InvalidInput(format!("invalid origin event id: {e}")))?;
+        if origin_bytes.len() != 32 {
+            return Err(ActionSinkError::InvalidInput(
+                "origin event id must be 32 bytes".into(),
+            ));
+        }
+        tags.push(
+            Tag::parse(["e", &origin_event_id.to_ascii_lowercase(), "", "reply"])
+                .map_err(|e| ActionSinkError::EventBuild(format!("origin e tag: {e}")))?,
+        );
+    }
+
+    Ok(tags)
 }
 
 impl ActionSink for RelayActionSink {
@@ -362,11 +447,239 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn publish_approval_request(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        workflow_id: Uuid,
+        run_id: Uuid,
+        step_id: &str,
+        step_index: i32,
+        approver_spec: &str,
+        message: &str,
+        expires_at: chrono::DateTime<Utc>,
+        token_hash: &str,
+        origin_event_id: Option<&str>,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let channel_id = channel_id.to_owned();
+        let step_id = step_id.to_owned();
+        let approver_spec = approver_spec.to_owned();
+        let message = message.to_owned();
+        let token_hash = token_hash.to_owned();
+        let origin_event_id = origin_event_id.map(str::to_owned);
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            let channel_uuid = Uuid::parse_str(&channel_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid UUID: {e}")))?;
+            let channel_id_canonical = channel_uuid.to_string();
+            let channel = state
+                .db
+                .get_channel(community_id, channel_uuid)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if channel.archived_at.is_some() {
+                return Err(ActionSinkError::ChannelArchived(channel_id_canonical));
+            }
+
+            let owner = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let owner_bytes = owner.to_bytes().to_vec();
+            let owner_hex = owner.to_hex();
+            if !state
+                .is_member_cached(community_id, channel_uuid, &owner_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                && channel.visibility != "open"
+            {
+                return Err(ActionSinkError::InvalidInput(
+                    "workflow owner does not have access to destination channel".into(),
+                ));
+            }
+
+            let content = approval_request_content(
+                workflow_id,
+                run_id,
+                &step_id,
+                step_index,
+                &approver_spec,
+                &message,
+                expires_at,
+                &owner_hex,
+            )?;
+            let tags = approval_request_tags(
+                &channel_id_canonical,
+                workflow_id,
+                run_id,
+                &step_id,
+                &token_hash,
+                &approver_spec,
+                origin_event_id.as_deref(),
+            )?;
+            let event =
+                EventBuilder::new(Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16), content)
+                    .tags(tags)
+                    .sign_with_keys(&state.relay_keypair)
+                    .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            let event_id_bytes = event.id.as_bytes().to_vec();
+            let event_created_at =
+                chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+                    .unwrap_or_else(Utc::now);
+
+            let parent = match origin_event_id.as_deref() {
+                Some(origin_event_id) => {
+                    let origin_bytes = hex::decode(origin_event_id).map_err(|e| {
+                        ActionSinkError::InvalidInput(format!("invalid origin event id: {e}"))
+                    })?;
+                    state
+                        .db
+                        .get_event_by_id(community_id, &origin_bytes)
+                        .await
+                        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                        .map(|stored| (origin_bytes, stored.event.created_at.as_secs() as i64))
+                }
+                None => None,
+            };
+            let parent_event_created_at = parent
+                .as_ref()
+                .and_then(|(_, ts)| chrono::DateTime::from_timestamp(*ts, 0));
+            let parent_event_id = parent.as_ref().map(|(id, _)| id.as_slice());
+            let thread_meta = Some(buzz_db::event::ThreadMetadataParams {
+                event_id: &event_id_bytes,
+                event_created_at,
+                channel_id: channel_uuid,
+                parent_event_id,
+                parent_event_created_at,
+                root_event_id: parent_event_id,
+                root_event_created_at: parent_event_created_at,
+                depth: if parent_event_id.is_some() { 1 } else { 0 },
+                broadcast: false,
+            });
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    community_id,
+                    &event,
+                    Some(channel_uuid),
+                    thread_meta,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    &owner_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_request_tags_bind_native_card_to_channel_and_thread() {
+        let workflow_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let approver = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let origin = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let tags = approval_request_tags(
+            "11111111-1111-4111-8111-111111111111",
+            workflow_id,
+            run_id,
+            "gate",
+            &"a".repeat(64),
+            approver,
+            Some(origin),
+        )
+        .expect("valid approval tags");
+
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["h", "11111111-1111-4111-8111-111111111111"]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["d", &"a".repeat(64)]));
+        assert!(tags.iter().any(|tag| tag.as_slice() == ["p", approver]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["e", origin, "", "reply"]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz:workflow", "approval"]));
+    }
+
+    #[test]
+    fn approval_request_content_contains_context_but_never_raw_token() {
+        let workflow_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let raw_token = "raw-token-must-not-escape";
+        let content = approval_request_content(
+            workflow_id,
+            run_id,
+            "gate",
+            1,
+            "role:admin",
+            "Approve the corrected #625 redraft",
+            Utc::now(),
+            &"b".repeat(64),
+        )
+        .expect("valid approval content");
+
+        assert!(content.contains("Approve the corrected #625 redraft"));
+        assert!(content.contains("role:admin"));
+        assert!(!content.contains(raw_token));
+        assert!(!content.contains("token"));
+    }
+
+    #[test]
+    fn approval_request_rejects_non_sha256_token_hash() {
+        let error = approval_request_tags(
+            "11111111-1111-4111-8111-111111111111",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "gate",
+            "not-a-hash",
+            "role:admin",
+            None,
+        )
+        .expect_err("invalid token hash must fail closed");
+
+        assert!(error.to_string().contains("invalid approval token hash"));
+    }
 
     fn m(name: &str, pubkey: &str) -> (String, String) {
         (name.to_string(), pubkey.to_string())

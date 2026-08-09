@@ -50,6 +50,7 @@ use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -276,29 +277,34 @@ impl WorkflowEngine {
                     let timeout_secs = timeout_secs.min(i64::MAX as u64) as i64;
                     let expires_at = Utc::now() + chrono::Duration::seconds(timeout_secs);
 
+                    let approval_message = approval.message.clone();
+                    let approver_spec = approval.approver_spec.clone();
+                    let step_id = step.id.clone();
+                    let approval_token = approval.approval_token.clone();
                     full_trace.push(serde_json::json!({
                         "step_id": step.id,
                         "status": "waiting_approval",
                         "output": {
-                            "message": approval.message,
-                            "approver_spec": approval.approver_spec,
+                            "message": approval_message,
+                            "approver_spec": approver_spec,
                             "expires_at": expires_at.to_rfc3339(),
                         },
                     }));
                     let trace_json = serde_json::Value::Array(full_trace);
-                    let workflow_id = match self.db.get_workflow_run(community_id, run_id).await {
-                        Ok(run) => run.workflow_id,
+                    let run = match self.db.get_workflow_run(community_id, run_id).await {
+                        Ok(run) => run,
                         Err(e) => {
                             tracing::error!(run_id = %run_id, "Failed to load workflow id for approval: {e}");
                             return;
                         }
                     };
+                    let workflow_id = run.workflow_id;
                     let params = buzz_db::workflow::CreateApprovalParams {
                         community_id,
-                        token: &approval.approval_token,
+                        token: &approval_token,
                         workflow_id,
                         run_id,
-                        step_id: &step.id,
+                        step_id: &step_id,
                         step_index: result.step_index as i32,
                         approver_spec: &approval.approver_spec,
                         expires_at,
@@ -316,6 +322,61 @@ impl WorkflowEngine {
                             expires_at = %expires_at,
                             "Workflow run suspended awaiting approval"
                         );
+
+                        // The DB row is the authority boundary. Only after it
+                        // commits do we publish the relay-signed request event
+                        // that the native Buzz client renders as a card.
+                        let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
+                        let origin_event_id = run
+                            .trigger_event_id
+                            .as_deref()
+                            .filter(|id| id.len() == 32)
+                            .map(hex::encode);
+                        match self.db.get_workflow(community_id, workflow_id).await {
+                            Ok(workflow) => {
+                                let Some(channel_id) = workflow.channel_id else {
+                                    tracing::warn!(
+                                        run_id = %run_id,
+                                        "Approval persisted but workflow has no channel; native request not published"
+                                    );
+                                    return;
+                                };
+                                let Some(sink) = self.action_sink.get() else {
+                                    tracing::warn!(
+                                        run_id = %run_id,
+                                        "Approval persisted but action sink is not initialized; native request not published"
+                                    );
+                                    return;
+                                };
+                                let author_pubkey = hex::encode(&workflow.owner_pubkey);
+                                if let Err(e) = sink
+                                    .publish_approval_request(
+                                        community_id,
+                                        &channel_id.to_string(),
+                                        workflow_id,
+                                        run_id,
+                                        &step_id,
+                                        result.step_index as i32,
+                                        &approval.approver_spec,
+                                        &approval.message,
+                                        expires_at,
+                                        &token_hash,
+                                        origin_event_id.as_deref(),
+                                        &author_pubkey,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!(
+                                        run_id = %run_id,
+                                        "Approval persisted but native request publication failed: {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => tracing::error!(
+                                run_id = %run_id,
+                                "Approval persisted but workflow lookup failed; native request not published: {e}"
+                            ),
+                        }
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");

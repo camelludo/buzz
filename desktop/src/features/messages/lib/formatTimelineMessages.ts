@@ -27,6 +27,7 @@ import {
   KIND_JOB_REQUEST,
   KIND_JOB_RESULT,
   KIND_HUDDLE_STARTED,
+  KIND_APPROVAL_REQUEST,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
@@ -50,6 +51,7 @@ export function isTimelineContentEvent(event: RelayEvent) {
   return (
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||
+    event.kind === KIND_APPROVAL_REQUEST ||
     event.kind === KIND_STREAM_MESSAGE_DIFF ||
     event.kind === KIND_SYSTEM_MESSAGE ||
     event.kind === KIND_JOB_REQUEST ||

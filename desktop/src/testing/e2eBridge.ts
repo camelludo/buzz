@@ -4717,6 +4717,7 @@ async function handleGetThreadReplies(
 const TIMELINE_KINDS = new Set([
   9,
   40002,
+  46010,
   40008,
   40099,
   43001,

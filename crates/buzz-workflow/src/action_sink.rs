@@ -7,6 +7,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +66,30 @@ pub trait ActionSink: Send + Sync {
         community_id: CommunityId,
         channel_id: &str,
         text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Publish the durable native approval-request event after the workflow
+    /// approval row has been committed.
+    ///
+    /// `token_hash` is the SHA-256 hex digest already used by
+    /// `workflow_approvals`; the raw approval token must never cross this
+    /// boundary or be included in the event payload. `origin_event_id` is the
+    /// triggering message ID when the workflow was started from a channel
+    /// event, allowing the relay to place the card in that thread.
+    fn publish_approval_request(
+        &self,
+        community_id: CommunityId,
+        channel_id: &str,
+        workflow_id: Uuid,
+        run_id: Uuid,
+        step_id: &str,
+        step_index: i32,
+        approver_spec: &str,
+        message: &str,
+        expires_at: DateTime<Utc>,
+        token_hash: &str,
+        origin_event_id: Option<&str>,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
