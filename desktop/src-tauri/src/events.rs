@@ -8,11 +8,9 @@
 //!
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
-
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
-
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -180,7 +178,6 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, String> {
 }
 
 /// Kind 9002 — update channel name/description/visibility/ttl.
-///
 /// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
 /// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
 pub fn build_update_channel(
@@ -295,6 +292,7 @@ pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<Even
 // ── Messages ─────────────────────────────────────────────────────────────────
 
 /// Kind 9 — stream message.
+#[allow(clippy::too_many_arguments)]
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -303,6 +301,8 @@ pub fn build_message(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    link_preview_tags: &[Vec<String>],
+    relay_base: &str,
 ) -> Result<EventBuilder, String> {
     build_message_with_client_tags(
         channel_id,
@@ -312,6 +312,8 @@ pub fn build_message(
         media_tags,
         custom_emoji_tags,
         mention_ref_tags,
+        link_preview_tags,
+        relay_base,
         &[],
     )
 }
@@ -330,6 +332,8 @@ pub fn build_message_with_client_tags(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
+    link_preview_tags: &[Vec<String>],
+    relay_base: &str,
     client_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
@@ -341,6 +345,7 @@ pub fn build_message_with_client_tags(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    crate::link_preview_tags::append(link_preview_tags, relay_base, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
@@ -396,18 +401,8 @@ pub fn build_forum_comment(
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
 }
 
-/// Kind 40003 — edit a message. Carries the full new content AND a fresh
-/// imeta tag set; the receiver overlays the imeta tags onto the original
-/// event so the rendered message reflects exactly the edited state. NIP-30
-/// custom-emoji tags ride along the same way so an edited body's `:shortcode:`s
-/// stay resolvable (the send path attaches these too).
-///
-/// `mentions` carries the pubkeys of mentions that are *newly added* by this
-/// edit (the caller diffs the edited body against the original). Only those get
-/// a `p` tag so the newly-mentioned party is notified/woken, while a typo-fix
-/// edit that leaves the mention set unchanged emits no `p` tags and never
-/// re-wakes anyone. This mirrors the send path's `mention_tags` (dedup +
-/// lowercase); the receiver overlays these onto the original event's audience.
+/// Kind 40003 — edit a message with full content, media, emoji, mentions,
+/// and optional monotonic link-preview suppression.
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
@@ -415,6 +410,7 @@ pub fn build_message_edit(
     media_tags: &[Vec<String>],
     custom_emoji_tags: &[Vec<String>],
     mentions: &[&str],
+    suppress_link_previews: bool,
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![
@@ -424,6 +420,9 @@ pub fn build_message_edit(
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
+    if suppress_link_previews {
+        tags.push(tag(vec!["link-preview", "none"])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
 }
 
@@ -834,13 +833,13 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String>
 
 /// Kind 46030 — grant an approval token (with optional note).
 pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = vec![tag(vec!["d", token])?];
     Ok(EventBuilder::new(Kind::Custom(46030), note.unwrap_or("")).tags(tags))
 }
 
 /// Kind 46031 — deny an approval token (with optional note).
 pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["t", token])?];
+    let tags = vec![tag(vec!["d", token])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
 }
 
@@ -855,6 +854,26 @@ mod tests {
         let channel_id = Uuid::new_v4();
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
         assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
+    }
+
+    #[test]
+    fn approval_builders_use_the_protocol_token_hash_tag() {
+        let secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let keys = Keys::new(secret);
+        let token_hash = "ab".repeat(32);
+
+        for builder in [
+            build_approval_grant(&token_hash, Some("approve")),
+            build_approval_deny(&token_hash, Some("deny")),
+        ] {
+            let event = builder.unwrap().sign_with_keys(&keys).unwrap();
+            let tags: Vec<Vec<String>> =
+                event.tags.iter().map(|tag| tag.as_slice().to_vec()).collect();
+            assert_eq!(tags, vec![vec!["d".to_owned(), token_hash.clone()]]);
+        }
     }
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.
@@ -948,7 +967,8 @@ mod tests {
         let target =
             EventId::from_hex("d24da132115ca0a46233cf4c2ad8338fbf914250cbcaa9181a6dd59533cb5ac1")
                 .unwrap();
-        let builder = build_message_edit(channel, target, "hi @alice", &[], &[], mentions).unwrap();
+        let builder =
+            build_message_edit(channel, target, "hi @alice", &[], &[], mentions, false).unwrap();
         let secret = nostr::SecretKey::from_hex(
             "0000000000000000000000000000000000000000000000000000000000000003",
         )

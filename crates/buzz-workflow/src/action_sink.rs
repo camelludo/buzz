@@ -7,6 +7,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +31,40 @@ pub enum ActionSinkError {
     /// Message content is empty or whitespace-only.
     #[error("empty message content")]
     EmptyContent,
+}
+
+/// Data required to publish one durable native approval request.
+///
+/// Keeping the publication payload together prevents the action-sink contract
+/// from growing an argument list whenever the native event gains another
+/// field. The raw approval token is intentionally absent; only its hash is
+/// allowed across this boundary.
+#[derive(Debug, Clone)]
+pub struct ApprovalRequestPublication {
+    /// The community that owns the workflow run.
+    pub community_id: CommunityId,
+    /// UUID string of the destination channel.
+    pub channel_id: String,
+    /// Workflow identity.
+    pub workflow_id: Uuid,
+    /// Run identity.
+    pub run_id: Uuid,
+    /// Workflow step identity.
+    pub step_id: String,
+    /// Zero-based workflow step index.
+    pub step_index: i32,
+    /// Serialized approver specification.
+    pub approver_spec: String,
+    /// Human-readable approval message.
+    pub message: String,
+    /// Approval expiry.
+    pub expires_at: DateTime<Utc>,
+    /// SHA-256 digest used by the approval row.
+    pub token_hash: String,
+    /// Triggering event ID, when the approval belongs in a thread.
+    pub origin_event_id: Option<String>,
+    /// Workflow owner pubkey used for attribution and access checks.
+    pub author_pubkey: String,
 }
 
 impl From<ActionSinkError> for crate::WorkflowError {
@@ -65,5 +101,18 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Publish the durable native approval-request event after the workflow
+    /// approval row has been committed.
+    ///
+    /// `token_hash` is the SHA-256 hex digest already used by
+    /// `workflow_approvals`; the raw approval token must never cross this
+    /// boundary or be included in the event payload. `origin_event_id` is the
+    /// triggering message ID when the workflow was started from a channel
+    /// event, allowing the relay to place the card in that thread.
+    fn publish_approval_request(
+        &self,
+        request: ApprovalRequestPublication,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

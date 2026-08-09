@@ -26,6 +26,9 @@ export function WorkflowApprovalCard({ approval }: WorkflowApprovalCardProps) {
       data-testid="workflow-approval-card"
     >
       <p className="mb-2 text-sm font-medium">Approval Required</p>
+      {approval.message ? (
+        <p className="mb-2 text-sm text-foreground">{approval.message}</p>
+      ) : null}
       <p className="mb-2 text-xs text-muted-foreground">
         Approver: {approval.approverSpec}
       </p>

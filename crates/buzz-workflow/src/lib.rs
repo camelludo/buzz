@@ -35,7 +35,7 @@ pub mod error;
 pub mod executor;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, ApprovalRequestPublication};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
@@ -50,6 +50,7 @@ use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -214,6 +215,7 @@ impl WorkflowEngine {
         &self,
         community_id: CommunityId,
         run_id: uuid::Uuid,
+        def: &WorkflowDef,
         result: Result<ExecutionResult, (WorkflowError, PartialProgress)>,
         existing_trace: Option<Vec<serde_json::Value>>,
     ) {
@@ -223,33 +225,156 @@ impl WorkflowEngine {
             Ok(result) => {
                 let mut full_trace = prefix;
                 full_trace.extend(result.trace);
-                let trace_json = serde_json::Value::Array(full_trace);
+                let trace_json = serde_json::Value::Array(full_trace.clone());
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
-                    if let Err(e) = self
-                        .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Failed,
-                            step_count,
-                            &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
-                        )
-                        .await
-                    {
+                if let Some(approval) = result.approval_request {
+                    let Some(step) = def.steps.get(result.step_index) else {
                         tracing::error!(
                             run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
+                            step_index = result.step_index,
+                            "Workflow approval step is outside the definition"
                         );
+                        if let Err(e) = self
+                            .db
+                            .update_workflow_run(
+                                community_id,
+                                run_id,
+                                RunStatus::Failed,
+                                step_count,
+                                &trace_json,
+                                Some("approval step is outside the workflow definition"),
+                            )
+                            .await
+                        {
+                            tracing::error!(run_id = %run_id, "Failed to mark invalid approval run: {e}");
+                        }
+                        return;
+                    };
+
+                    let timeout_str = approval.timeout.as_deref().unwrap_or("24h");
+                    let timeout_secs = match executor::parse_duration_secs(timeout_str) {
+                        Ok(secs) => secs,
+                        Err(e) => {
+                            tracing::error!(run_id = %run_id, "Invalid approval timeout: {e}");
+                            if let Err(db_err) = self
+                                .db
+                                .update_workflow_run(
+                                    community_id,
+                                    run_id,
+                                    RunStatus::Failed,
+                                    step_count,
+                                    &trace_json,
+                                    Some(&e.to_string()),
+                                )
+                                .await
+                            {
+                                tracing::error!(run_id = %run_id, "Failed to mark invalid approval timeout: {db_err}");
+                            }
+                            return;
+                        }
+                    };
+                    let timeout_secs = timeout_secs.min(i64::MAX as u64) as i64;
+                    let expires_at = Utc::now() + chrono::Duration::seconds(timeout_secs);
+
+                    let approval_message = approval.message.clone();
+                    let approver_spec = approval.approver_spec.clone();
+                    let step_id = step.id.clone();
+                    let approval_token = approval.approval_token.clone();
+                    full_trace.push(serde_json::json!({
+                        "step_id": step.id,
+                        "status": "waiting_approval",
+                        "output": {
+                            "message": approval_message,
+                            "approver_spec": approver_spec,
+                            "expires_at": expires_at.to_rfc3339(),
+                        },
+                    }));
+                    let trace_json = serde_json::Value::Array(full_trace);
+                    let run = match self.db.get_workflow_run(community_id, run_id).await {
+                        Ok(run) => run,
+                        Err(e) => {
+                            tracing::error!(run_id = %run_id, "Failed to load workflow id for approval: {e}");
+                            return;
+                        }
+                    };
+                    let workflow_id = run.workflow_id;
+                    let params = buzz_db::workflow::CreateApprovalParams {
+                        community_id,
+                        token: &approval_token,
+                        workflow_id,
+                        run_id,
+                        step_id: &step_id,
+                        step_index: result.step_index as i32,
+                        approver_spec: &approval.approver_spec,
+                        expires_at,
+                    };
+                    if let Err(e) = self
+                        .db
+                        .suspend_workflow_run(run_id, step_count, &trace_json, params)
+                        .await
+                    {
+                        tracing::error!(run_id = %run_id, "Failed to persist workflow approval: {e}");
+                    } else {
+                        tracing::info!(
+                            run_id = %run_id,
+                            step_index = result.step_index,
+                            expires_at = %expires_at,
+                            "Workflow run suspended awaiting approval"
+                        );
+
+                        // The DB row is the authority boundary. Only after it
+                        // commits do we publish the relay-signed request event
+                        // that the native Buzz client renders as a card.
+                        let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
+                        let origin_event_id = run
+                            .trigger_event_id
+                            .as_deref()
+                            .filter(|id| id.len() == 32)
+                            .map(hex::encode);
+                        match self.db.get_workflow(community_id, workflow_id).await {
+                            Ok(workflow) => {
+                                let Some(channel_id) = workflow.channel_id else {
+                                    tracing::warn!(
+                                        run_id = %run_id,
+                                        "Approval persisted but workflow has no channel; native request not published"
+                                    );
+                                    return;
+                                };
+                                let Some(sink) = self.action_sink.get() else {
+                                    tracing::warn!(
+                                        run_id = %run_id,
+                                        "Approval persisted but action sink is not initialized; native request not published"
+                                    );
+                                    return;
+                                };
+                                let author_pubkey = hex::encode(&workflow.owner_pubkey);
+                                let request = ApprovalRequestPublication {
+                                    community_id,
+                                    channel_id: channel_id.to_string(),
+                                    workflow_id,
+                                    run_id,
+                                    step_id: step_id.clone(),
+                                    step_index: result.step_index as i32,
+                                    approver_spec: approval.approver_spec.clone(),
+                                    message: approval.message.clone(),
+                                    expires_at,
+                                    token_hash,
+                                    origin_event_id,
+                                    author_pubkey,
+                                };
+                                if let Err(e) = sink.publish_approval_request(request).await {
+                                    tracing::error!(
+                                        run_id = %run_id,
+                                        "Approval persisted but native request publication failed: {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => tracing::error!(
+                                run_id = %run_id,
+                                "Approval persisted but workflow lookup failed; native request not published: {e}"
+                            ),
+                        }
                     }
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
@@ -428,7 +553,7 @@ impl WorkflowEngine {
                     executor::execute_run(&engine, community_id, run_id, &def_clone, &ctx_clone)
                         .await;
                 engine
-                    .finalize_run(community_id, run_id, result, None)
+                    .finalize_run(community_id, run_id, &def_clone, result, None)
                     .await;
             });
         }
@@ -727,7 +852,7 @@ impl WorkflowEngine {
                     )
                     .await;
                     engine
-                        .finalize_run(community_id, run_id, result, None)
+                        .finalize_run(community_id, run_id, &def_clone, result, None)
                         .await;
                 });
             }

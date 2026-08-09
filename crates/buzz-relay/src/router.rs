@@ -117,6 +117,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/moderation/restricted",
             get(api::bridge::moderation_restricted),
         )
+        // Workflow state reads (NIP-98 auth + channel membership)
+        .route(
+            "/api/workflows/{workflow_id}/runs",
+            get(api::bridge::workflow_runs),
+        )
+        .route(
+            "/api/workflows/{workflow_id}/runs/{run_id}/approvals",
+            get(api::bridge::workflow_run_approvals),
+        )
         // Webhook trigger (secret-authenticated, no NIP-98)
         .route("/hooks/{id}", post(api::bridge::workflow_webhook))
         // Mesh demo echo probe — testbed-only; 404 unless BUZZ_MESH=on and

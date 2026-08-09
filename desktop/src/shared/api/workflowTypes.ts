@@ -57,6 +57,8 @@ export type WorkflowApproval = {
   runId: string;
   stepId: string;
   stepIndex: number;
+  /** Human-readable action requested by the workflow. */
+  message?: string;
   approverSpec: string;
   status: WorkflowApprovalStatus;
   approverPubkey: string | null;

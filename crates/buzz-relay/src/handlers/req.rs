@@ -855,18 +855,20 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
+///
+/// A filter with multiple channel values is a logical OR across channels and
+/// must remain unscoped here so the caller can apply its complete access
+/// set. Returning the first value would silently drop every other channel
+/// before the Nostr filter matcher runs.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
-            }
-        }
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let values = filter.generic_tags.get(&h_tag)?;
+    let mut ids = values.iter().filter_map(|value| value.parse().ok());
+    let first = ids.next()?;
+    if ids.next().is_some() {
+        return None;
     }
-    None
+    Some(first)
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1584,6 +1586,18 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    #[test]
+    fn single_filter_with_multiple_channels_stays_unscoped() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let filter = Filter::new().custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            [channel_a.to_string(), channel_b.to_string()],
+        );
+
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
     }
 
     #[test]

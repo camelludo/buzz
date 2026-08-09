@@ -1,0 +1,10 @@
+{
+  "productName": "Buzz WF08 Canary",
+  "identifier": "xyz.block.buzz.app.wf08-canary",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

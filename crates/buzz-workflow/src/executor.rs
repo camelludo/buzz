@@ -460,6 +460,12 @@ pub enum StepResult {
     Suspended {
         /// Token used to resume or reject this approval gate.
         approval_token: String,
+        /// Resolved approver mention or role specification.
+        approver_spec: String,
+        /// Resolved message shown to the approver.
+        message: String,
+        /// Optional approval expiry duration.
+        timeout: Option<String>,
     },
     /// Step was skipped due to `if:` condition being false.
     Skipped,
@@ -665,6 +671,9 @@ pub async fn dispatch_action(
 
             Ok(StepResult::Suspended {
                 approval_token: token,
+                approver_spec: from.clone(),
+                message: message.clone(),
+                timeout: timeout.clone(),
             })
         }
 
@@ -943,12 +952,27 @@ pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
     pub approval_token: Option<String>,
+    /// Fully resolved approval request when execution suspended.
+    pub approval_request: Option<ApprovalRequest>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
     pub step_outputs: HashMap<String, JsonValue>,
     /// Execution trace: one entry per completed/skipped step.
     pub trace: Vec<JsonValue>,
+}
+
+/// Fully resolved data needed to persist and render an approval gate.
+#[derive(Debug, Clone)]
+pub struct ApprovalRequest {
+    /// Raw token used only to create the hashed database record.
+    pub approval_token: String,
+    /// Resolved approver mention or role specification.
+    pub approver_spec: String,
+    /// Resolved message shown to the approver.
+    pub message: String,
+    /// Optional approval expiry duration.
+    pub timeout: Option<String>,
 }
 
 /// Execute a workflow run sequentially.
@@ -1183,7 +1207,12 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended {
+                approval_token,
+                approver_spec,
+                message,
+                timeout,
+            } => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
@@ -1191,7 +1220,13 @@ async fn execute_steps(
                 // Return the token and current state so the caller can persist the
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
-                    approval_token: Some(approval_token),
+                    approval_token: Some(approval_token.clone()),
+                    approval_request: Some(ApprovalRequest {
+                        approval_token,
+                        approver_spec,
+                        message,
+                        timeout,
+                    }),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1210,6 +1245,7 @@ async fn execute_steps(
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
         approval_token: None,
+        approval_request: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,

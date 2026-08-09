@@ -3820,6 +3820,17 @@ impl Db {
         .await
     }
 
+    /// Atomically persist a pending approval and suspend its workflow run.
+    pub async fn suspend_workflow_run(
+        &self,
+        run_id: uuid::Uuid,
+        current_step: i32,
+        trace: &serde_json::Value,
+        params: workflow::CreateApprovalParams<'_>,
+    ) -> Result<()> {
+        workflow::suspend_workflow_run(&self.pool, run_id, current_step, trace, params).await
+    }
+
     /// Create an approval request.
     pub async fn create_approval(&self, params: workflow::CreateApprovalParams<'_>) -> Result<()> {
         workflow::create_approval(&self.pool, params).await
